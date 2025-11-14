@@ -383,18 +383,360 @@ The server sends JSON messages with a `type` field:
 
 ---
 
-## 8. Production Considerations
+## 8. Production Mode (Render.com Deployment)
 
-### For Production (Render.com or similar):
+### Configuration for Production
+
+Add a configuration flag to easily switch between local and production:
+
 ```typescript
-// Use wss:// for secure WebSocket
-const SERVER_URL = 'wss://your-backend.onrender.com/ws';
+// Configuration
+const USE_PRODUCTION = true;  // Set to true for Render, false for local
+
+const SERVER_URL = USE_PRODUCTION
+  ? 'wss://iot-backend-uy96.onrender.com/ws'  // Production (Render)
+  : 'ws://192.168.0.115:3000/ws';              // Local development
 ```
+
+### Updated Component with Production Support
+
+```typescript
+import React, { useState, useEffect, useRef } from 'react';
+import { View, Image, Text, StyleSheet, ActivityIndicator, Alert } from 'react-native';
+
+// ===== DEPLOYMENT CONFIGURATION ===== //
+const USE_PRODUCTION = true;  // true = Render.com, false = Local
+
+const SERVER_URL = USE_PRODUCTION
+  ? 'wss://iot-backend-uy96.onrender.com/ws'  // Production: Secure WebSocket
+  : 'ws://192.168.0.115:3000/ws';              // Local: Plain WebSocket
+// ==================================== //
+
+interface Esp32Status {
+  connected: boolean;
+  lastUpdate: string | null;
+  frameCount: number;
+  fps: number;
+}
+
+export default function CameraStream() {
+  const [frameData, setFrameData] = useState<string | null>(null);
+  const [status, setStatus] = useState<Esp32Status | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    connectWebSocket();
+
+    return () => {
+      // Cleanup on unmount
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const connectWebSocket = () => {
+    try {
+      console.log(`🔌 Connecting to ${USE_PRODUCTION ? 'Production' : 'Local'} server...`);
+      console.log(`   URL: ${SERVER_URL}`);
+      
+      const ws = new WebSocket(SERVER_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('✅ Connected to WebSocket server');
+        setIsConnected(true);
+        
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          
+          switch (message.type) {
+            case 'frame':
+              // Update frame image
+              setFrameData(`data:image/jpeg;base64,${message.image}`);
+              break;
+              
+            case 'status':
+              // Update ESP32 status
+              setStatus(message.data);
+              break;
+              
+            default:
+              console.log('Unknown message type:', message.type);
+          }
+        } catch (error) {
+          console.error('Failed to parse message:', error);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setIsConnected(false);
+        
+        // Show user-friendly error in production
+        if (USE_PRODUCTION) {
+          Alert.alert(
+            'Connection Error',
+            'Failed to connect to server. Please check your internet connection.',
+            [{ text: 'OK' }]
+          );
+        }
+      };
+
+      ws.onclose = (event) => {
+        console.log('WebSocket closed', event.code, event.reason);
+        setIsConnected(false);
+        
+        // Auto-reconnect (longer delay for production)
+        const reconnectDelay = USE_PRODUCTION ? 5000 : 2000;
+        reconnectTimeoutRef.current = setTimeout(() => {
+          console.log('🔄 Reconnecting...');
+          connectWebSocket();
+        }, reconnectDelay);
+      };
+    } catch (error) {
+      console.error('Failed to create WebSocket:', error);
+      setIsConnected(false);
+      
+      if (USE_PRODUCTION) {
+        Alert.alert('Connection Error', 'Failed to create WebSocket connection');
+      }
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      {/* Connection Status */}
+      <View style={styles.statusBar}>
+        <View style={[styles.statusIndicator, { backgroundColor: isConnected ? '#4CAF50' : '#F44336' }]} />
+        <Text style={styles.statusText}>
+          {isConnected ? 'Connected' : 'Disconnected'}
+        </Text>
+        {USE_PRODUCTION && (
+          <Text style={[styles.statusText, { marginLeft: 8, opacity: 0.7 }]}>
+            (Production)
+          </Text>
+        )}
+        {status && (
+          <Text style={styles.statusText}>
+            | Frames: {status.frameCount} | FPS: {status.fps.toFixed(1)}
+          </Text>
+        )}
+      </View>
+
+      {/* Camera Frame */}
+      {frameData ? (
+        <Image
+          source={{ uri: frameData }}
+          style={styles.cameraFrame}
+          resizeMode="contain"
+        />
+      ) : (
+        <View style={styles.placeholder}>
+          <ActivityIndicator size="large" color="#2196F3" />
+          <Text style={styles.placeholderText}>
+            {USE_PRODUCTION ? 'Connecting to production server...' : 'Waiting for frames...'}
+          </Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  statusBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    backgroundColor: '#1a1a1a',
+  },
+  statusIndicator: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: 8,
+  },
+  statusText: {
+    color: '#fff',
+    fontSize: 12,
+  },
+  cameraFrame: {
+    flex: 1,
+    width: '100%',
+  },
+  placeholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  placeholderText: {
+    color: '#fff',
+    marginTop: 10,
+  },
+});
+```
+
+### Key Differences: Local vs Production
+
+| Feature | Local Development | Production (Render) |
+|---------|-------------------|-------------------|
+| **Protocol** | `ws://` (HTTP) | `wss://` (HTTPS) |
+| **URL** | `ws://192.168.0.115:3000/ws` | `wss://iot-backend-uy96.onrender.com/ws` |
+| **Port** | 3000 | 443 (default for WSS) |
+| **SSL** | Not required | Required (automatic with `wss://`) |
+| **Network** | Same WiFi network | Internet (anywhere) |
+| **Reconnection Delay** | 2 seconds | 5 seconds (Render may be slower) |
+
+### Production-Specific Considerations
+
+#### 1. Render Service Behavior
+- **Cold Start**: First connection after inactivity may take 30-60 seconds
+- **Sleep Mode**: Free tier services sleep after 15 minutes
+- **Connection Timeout**: Render may close idle connections
+
+#### 2. Error Handling for Production
+```typescript
+ws.onerror = (error) => {
+  console.error('WebSocket error:', error);
+  setIsConnected(false);
+  
+  // Show user-friendly error
+  Alert.alert(
+    'Connection Error',
+    'Unable to connect to server. The service may be starting up. Please try again in a moment.',
+    [
+      { text: 'Retry', onPress: () => connectWebSocket() },
+      { text: 'Cancel', style: 'cancel' }
+    ]
+  );
+};
+```
+
+#### 3. Connection Status Indicators
+```typescript
+// Show different messages based on connection state
+{!isConnected && (
+  <View style={styles.errorContainer}>
+    <Text style={styles.errorText}>
+      {USE_PRODUCTION 
+        ? 'Connecting to production server...\nThis may take up to 60 seconds on first connection.'
+        : 'Connecting to local server...'}
+    </Text>
+  </View>
+)}
+```
+
+#### 4. Network Detection
+```typescript
+import NetInfo from '@react-native-community/netinfo';
+
+// Check network before connecting
+useEffect(() => {
+  const unsubscribe = NetInfo.addEventListener(state => {
+    if (!state.isConnected && USE_PRODUCTION) {
+      Alert.alert('No Internet', 'Please check your internet connection');
+    }
+  });
+
+  return () => unsubscribe();
+}, []);
+```
+
+### Performance Optimization for Production
+
+1. **Image Caching**:
+```typescript
+import FastImage from 'react-native-fast-image';
+
+// Use FastImage for better performance
+<FastImage
+  source={{ uri: frameData, priority: FastImage.priority.high }}
+  style={styles.cameraFrame}
+  resizeMode={FastImage.resizeMode.contain}
+/>
+```
+
+2. **Frame Rate Throttling**:
+```typescript
+// Only update UI every N frames to reduce re-renders
+let frameUpdateCount = 0;
+ws.onmessage = (event) => {
+  const message = JSON.parse(event.data);
+  if (message.type === 'frame') {
+    frameUpdateCount++;
+    // Update every 3rd frame for smoother performance
+    if (frameUpdateCount % 3 === 0 || frameUpdateCount === 1) {
+      setFrameData(`data:image/jpeg;base64,${message.image}`);
+    }
+  }
+};
+```
+
+3. **Memory Management**:
+```typescript
+// Clear old frame data to prevent memory leaks
+useEffect(() => {
+  return () => {
+    setFrameData(null);
+    setStatus(null);
+  };
+}, []);
+```
+
+### Testing Production Mode
+
+1. **Update Configuration**:
+   ```typescript
+   const USE_PRODUCTION = true;
+   const SERVER_URL = 'wss://iot-backend-uy96.onrender.com/ws';
+   ```
+
+2. **Test Connection**:
+   - App should connect to Render server
+   - First connection may be slow (cold start)
+   - Subsequent connections should be faster
+
+3. **Verify Frames**:
+   - Check that frames are received
+   - Monitor connection stability
+   - Test reconnection after disconnection
+
+### Troubleshooting Production Issues
+
+#### Issue: Connection fails on first try
+- **Cause**: Render service cold start
+- **Solution**: Wait 30-60 seconds and retry
+
+#### Issue: Frequent disconnections
+- **Cause**: Render timeout or network issues
+- **Solution**: Increase reconnection delay, check network stability
+
+#### Issue: Slow frame updates
+- **Cause**: Network latency or Render performance
+- **Solution**: Reduce frame rate, optimize image size
 
 ### Error Handling:
 ```typescript
 ws.onerror = (error) => {
   console.error('WebSocket error:', error);
+  setIsConnected(false);
+  
   // Show user-friendly error message
   Alert.alert('Connection Error', 'Failed to connect to server');
 };
@@ -413,7 +755,23 @@ ws.onerror = (error) => {
 ✅ **Added**: Native WebSocket (built-in)  
 ✅ **Updated**: Message handling to parse JSON with `type` field  
 ✅ **Added**: Manual reconnection logic  
-✅ **Updated**: Connection URL to use `ws://` protocol  
+✅ **Updated**: Connection URL to use `ws://` protocol (local) or `wss://` (production)  
+✅ **Added**: Production mode support with `USE_PRODUCTION` flag  
+✅ **Added**: Render.com deployment configuration  
 
-Your React Native app should now work with the new WebSocket backend!
+### Quick Switch Between Local and Production
+
+**For Local Development:**
+```typescript
+const USE_PRODUCTION = false;
+const SERVER_URL = 'ws://192.168.0.115:3000/ws';
+```
+
+**For Production (Render.com):**
+```typescript
+const USE_PRODUCTION = true;
+const SERVER_URL = 'wss://iot-backend-uy96.onrender.com/ws';
+```
+
+Your React Native app now works with both local development and production deployment! 🚀
 

@@ -45,7 +45,7 @@ const parsePrediction = (prediction: DiseasePrediction): ParsedDiseasePrediction
 export default function Index() {
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'checking' | 'connected' | 'disconnected'>('checking');
-  const { backendUrl, checkConnection } = useCamera();
+  const { backendUrl, isProduction, checkConnection } = useCamera();
   const [isCapturing, setIsCapturing] = useState(false);
   const [prediction, setPrediction] = useState<ParsedDiseasePrediction | null>(null);
 
@@ -186,7 +186,7 @@ export default function Index() {
             <View className="flex-row items-center">
               <Text className="text-white text-3xl font-bold">ESP32 Camera</Text>
               <View className="ml-3 bg-blue-600 px-2 py-1 rounded-lg">
-                <Text className="text-white text-xs font-bold">Socket.IO</Text>
+                <Text className="text-white text-xs font-bold">WebSocket</Text>
               </View>
             </View>
             <View className="flex-row items-center mt-2">
@@ -195,7 +195,7 @@ export default function Index() {
                 style={{ backgroundColor: getStatusColor() }}
               />
               <Text className="text-gray-400 text-sm">
-                {getStatusText()} • {backendUrl.replace('http://', '')}
+                {getStatusText()} • {backendUrl.replace('http://', '').replace('https://', '')}
               </Text>
             </View>
           </View>

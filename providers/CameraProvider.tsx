@@ -5,11 +5,16 @@ import { Platform } from 'react-native';
 interface CameraContextType {
   backendUrl: string;
   setBackendUrl: (url: string) => void;
+  isProduction: boolean;
+  setIsProduction: (value: boolean) => void;
   isConnected: boolean;
   checkConnection: () => Promise<boolean>;
 }
 
 const CameraContext = createContext<CameraContextType | undefined>(undefined);
+
+// Production backend URL
+const PRODUCTION_URL = 'https://iot-backend-uy96.onrender.com';
 
 // Auto-detect backend URL based on platform (for emulator support)
 const getDefaultBackendUrl = (): string => {
@@ -28,6 +33,7 @@ const getDefaultBackendUrl = (): string => {
 
 export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [backendUrl, setBackendUrlState] = useState<string>(getDefaultBackendUrl());
+  const [isProduction, setIsProductionState] = useState<boolean>(false);
   const [isConnected, setIsConnected] = useState<boolean>(false);
 
   // Load saved settings from storage
@@ -38,9 +44,18 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const loadSavedSettings = async () => {
     try {
       const savedBackendUrl = await AsyncStorage.getItem('backend_url');
+      const savedIsProduction = await AsyncStorage.getItem('is_production');
       
       if (savedBackendUrl) {
         setBackendUrlState(savedBackendUrl);
+      }
+      
+      if (savedIsProduction !== null) {
+        setIsProductionState(savedIsProduction === 'true');
+        // If production mode is enabled, use production URL
+        if (savedIsProduction === 'true') {
+          setBackendUrlState(PRODUCTION_URL);
+        }
       }
     } catch (error) {
       console.error('Failed to load settings:', error);
@@ -53,6 +68,22 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       await AsyncStorage.setItem('backend_url', url);
     } catch (error) {
       console.error('Failed to save backend URL:', error);
+    }
+  };
+
+  const setIsProduction = async (value: boolean) => {
+    setIsProductionState(value);
+    try {
+      await AsyncStorage.setItem('is_production', value.toString());
+      
+      // Auto-update URL when switching modes
+      if (value) {
+        setBackendUrlState(PRODUCTION_URL);
+      } else {
+        setBackendUrlState(getDefaultBackendUrl());
+      }
+    } catch (error) {
+      console.error('Failed to save production mode:', error);
     }
   };
 
@@ -80,6 +111,8 @@ export const CameraProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       value={{
         backendUrl,
         setBackendUrl,
+        isProduction,
+        setIsProduction,
         isConnected,
         checkConnection,
       }}
