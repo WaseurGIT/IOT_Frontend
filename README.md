@@ -87,3 +87,5 @@ npx expo run:ios
 1. Make sure `.env` file exists in project root
 2. Variables must be prefixed with `EXPO_PUBLIC_`
 3. Restart Expo dev server after changes
+
+751268

@@ -1,5 +1,5 @@
 import { MaterialIcons } from '@expo/vector-icons';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Alert, ScrollView, StatusBar, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { SettingsModal } from '../components/SettingsModal';
@@ -7,6 +7,8 @@ import { SocketCameraStream } from '../components/SocketCameraStream';
 import "../global.css";
 import { useCamera } from '../providers/CameraProvider';
 import { cameraApi, DiseasePrediction } from '../services/cameraApi';
+import { carApi } from '../services/carApi';
+import { carSocket, CarStatus } from '../services/carSocket';
 
 type ParsedDiseasePrediction = {
   plant: string;
@@ -52,22 +54,64 @@ export default function Index() {
   // Car control state
   const [carConnected, setCarConnected] = useState(false);
   const [carConnecting, setCarConnecting] = useState(false);
-  const [carStatus, setCarStatus] = useState<any>(null);
+  const [carStatus, setCarStatus] = useState<CarStatus | null>(null);
   const [lastCarCommand, setLastCarCommand] = useState<string | null>(null);
   const [motorSpeed, setMotorSpeed] = useState(200);
   const [showCarControls, setShowCarControls] = useState(false);
-  
-  // WebSocket reference for car control
-  const carWs = useRef<WebSocket | null>(null);
-  const carReconnectAttempts = useRef(0);
-  const maxCarReconnectAttempts = 5;
 
   useEffect(() => {
-    // Update API base URL when backend URL changes
+    // Update API base URLs when backend URL changes
     cameraApi.setBaseURL(backendUrl);
+    carApi.setBaseURL(backendUrl);
     // Check connection on mount
     handleCheckConnection();
   }, [backendUrl]);
+
+  // Setup car WebSocket event listeners
+  useEffect(() => {
+    // Connection status
+    carSocket.on('connected', (connected: boolean) => {
+      setCarConnected(connected);
+      setCarConnecting(false);
+    });
+
+    // Car status updates
+    carSocket.on('status', (status: CarStatus) => {
+      setCarStatus(status);
+    });
+
+    // Command acknowledgments
+    carSocket.on('acknowledgment', (data: { command: string; status: string }) => {
+      setLastCarCommand(data.command);
+      console.log('✅ Car acknowledged:', data.command, data.status);
+    });
+
+    // Device connected/disconnected
+    carSocket.on('device_connected', (data: { device: string; status: string }) => {
+      console.log('🚗 ESP32 car connected:', data.device);
+    });
+
+    carSocket.on('device_disconnected', () => {
+      console.log('🚗 ESP32 car disconnected');
+      setCarStatus(prev => prev ? { ...prev, connected: false } : null);
+    });
+
+    // Errors
+    carSocket.on('error', (error: any) => {
+      console.error('❌ Car error:', error);
+    });
+
+    // Cleanup on unmount
+    return () => {
+      carSocket.off('connected');
+      carSocket.off('status');
+      carSocket.off('acknowledgment');
+      carSocket.off('device_connected');
+      carSocket.off('device_disconnected');
+      carSocket.off('error');
+      carSocket.disconnect();
+    };
+  }, []);
 
   const handleCheckConnection = async () => {
     setConnectionStatus('checking');
@@ -190,72 +234,16 @@ export default function Index() {
 
   // Car Control Functions
   const connectCarWebSocket = () => {
-    if (carWs.current?.readyState === WebSocket.OPEN) {
+    if (carSocket.isConnected()) {
       Alert.alert('Info', 'Car already connected');
       return;
     }
 
     setCarConnecting(true);
-    carReconnectAttempts.current = 0;
-
+    
     try {
-      // Extract IP and port from backendUrl (e.g., "http://192.168.0.115:3000")
-      const url = backendUrl.replace('http://', '').replace('https://', '');
-      const wsUrl = `ws://${url}/ws`;
-      console.log('🚗 Connecting car to:', wsUrl);
-      
-      carWs.current = new WebSocket(wsUrl);
-
-      carWs.current.onopen = () => {
-        console.log('✅ Car WebSocket Connected');
-        setCarConnected(true);
-        setCarConnecting(false);
-        carReconnectAttempts.current = 0;
-      };
-
-      carWs.current.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          
-          if (data.type === 'car_status') {
-            setCarStatus(data.data);
-          } else if (data.type === 'car_ack') {
-            setLastCarCommand(data.command);
-            console.log('✅ Car command acknowledged:', data.command);
-          }
-        } catch (error) {
-          console.error('❌ Error parsing car message:', error);
-        }
-      };
-
-      carWs.current.onerror = (error) => {
-        console.error('❌ Car WebSocket Error:', error);
-        setCarConnecting(false);
-        
-        if (carReconnectAttempts.current < maxCarReconnectAttempts) {
-          carReconnectAttempts.current++;
-          setTimeout(() => {
-            console.log(`🔄 Car reconnect attempt ${carReconnectAttempts.current}/${maxCarReconnectAttempts}`);
-            connectCarWebSocket();
-          }, 2000);
-        }
-      };
-
-      carWs.current.onclose = (event) => {
-        console.log('🔌 Car WebSocket Disconnected', event.code);
-        setCarConnected(false);
-        setCarConnecting(false);
-        
-        // Auto-reconnect if not manually closed
-        if (event.code !== 1000 && carReconnectAttempts.current < maxCarReconnectAttempts) {
-          carReconnectAttempts.current++;
-          setTimeout(() => {
-            console.log(`🔄 Car auto-reconnecting... (${carReconnectAttempts.current}/${maxCarReconnectAttempts})`);
-            connectCarWebSocket();
-          }, 3000);
-        }
-      };
-
+      carSocket.connect(backendUrl);
+      console.log('🚗 Initiating car connection to:', backendUrl);
     } catch (error: any) {
       console.error('❌ Car connection error:', error);
       setCarConnecting(false);
@@ -264,18 +252,15 @@ export default function Index() {
   };
 
   const disconnectCarWebSocket = () => {
-    carReconnectAttempts.current = maxCarReconnectAttempts; // Prevent auto-reconnect
-    if (carWs.current) {
-      carWs.current.close(1000, 'User disconnected');
-      carWs.current = null;
-    }
+    carSocket.disconnect();
     setCarConnected(false);
     setCarStatus(null);
     setLastCarCommand(null);
+    console.log('🔌 Car disconnected');
   };
 
-  const sendCarCommand = (command: string) => {
-    if (!carWs.current || carWs.current.readyState !== WebSocket.OPEN) {
+  const sendCarCommand = (command: 'forward' | 'backward' | 'left' | 'right' | 'stop') => {
+    if (!carSocket.isConnected()) {
       Alert.alert('Error', 'Car not connected to server');
       return;
     }
@@ -285,24 +270,11 @@ export default function Index() {
       return;
     }
 
-    const message = JSON.stringify({
-      command: command,
-      speed: motorSpeed,
-    });
-
-    carWs.current.send(message);
-    setLastCarCommand(command);
-    console.log('📤 Car command sent:', command, 'speed:', motorSpeed);
+    const success = carSocket.sendCommand(command, motorSpeed);
+    if (success) {
+      setLastCarCommand(command);
+    }
   };
-
-  // Cleanup car WebSocket on unmount
-  useEffect(() => {
-    return () => {
-      if (carWs.current) {
-        carWs.current.close();
-      }
-    };
-  }, []);
 
   return (
     <SafeAreaView className="flex-1 bg-gray-950" edges={['top']}>
@@ -313,7 +285,7 @@ export default function Index() {
         <View className="flex-row items-center justify-between mb-4">
           <View>
             <View className="flex-row items-center">
-              <Text className="text-white text-3xl font-bold">ESP32 IoT Hub</Text>
+              <Text className="text-white text-3xl font-bold">CropGuardian</Text>
               <View className="ml-3 bg-blue-600 px-2 py-1 rounded-lg">
                 <Text className="text-white text-xs font-bold">WebSocket</Text>
               </View>
@@ -460,79 +432,73 @@ export default function Index() {
           </View>
         )}
 
-        {/* Car Control Panel */}
+        {/* Car Control Panel - Compact Design */}
         {showCarControls && (
-          <View className="bg-gray-900 rounded-3xl p-4 mb-4">
-            <View className="flex-row items-center justify-between mb-4">
+          <View className="bg-gray-900 rounded-3xl p-3 mb-3">
+            {/* Header with Close Button */}
+            <View className="flex-row items-center justify-between mb-3">
               <View className="flex-row items-center">
-                <MaterialIcons name="directions-car" size={24} color="#3B82F6" />
-                <Text className="text-white text-xl font-bold ml-2">Car Control</Text>
+                <MaterialIcons name="directions-car" size={20} color="#3B82F6" />
+                <Text className="text-white text-lg font-bold ml-2">Car Control</Text>
               </View>
-              <TouchableOpacity onPress={() => setShowCarControls(false)}>
-                <MaterialIcons name="close" size={24} color="#9CA3AF" />
+              <TouchableOpacity onPress={() => setShowCarControls(false)} className="p-1">
+                <MaterialIcons name="close" size={20} color="#9CA3AF" />
               </TouchableOpacity>
             </View>
 
-            {/* Car Connection Status */}
-            <View className="bg-gray-800 rounded-2xl p-3 mb-4">
-              <View className="flex-row justify-between items-center">
-                <Text className="text-gray-400 text-sm">WebSocket:</Text>
-                <Text className={`font-bold ${carConnected ? 'text-green-400' : 'text-red-400'}`}>
-                  {carConnected ? '🟢 Connected' : '🔴 Disconnected'}
-                </Text>
+            {/* Compact Status & Connection */}
+            <View className="flex-row items-center justify-between mb-3">
+              {/* Status Indicators */}
+              <View className="flex-row items-center gap-3">
+                <View className="flex-row items-center">
+                  <View className={`w-2 h-2 rounded-full mr-1 ${carConnected ? 'bg-green-500' : 'bg-red-500'}`} />
+                  <Text className="text-gray-400 text-xs">WS</Text>
+                </View>
+                {carStatus && (
+                  <View className="flex-row items-center">
+                    <View className={`w-2 h-2 rounded-full mr-1 ${carStatus.connected ? 'bg-green-500' : 'bg-red-500'}`} />
+                    <Text className="text-gray-400 text-xs">ESP32</Text>
+                  </View>
+                )}
+                {lastCarCommand && (
+                  <Text className="text-blue-400 text-xs font-bold uppercase">{lastCarCommand}</Text>
+                )}
               </View>
-              {carStatus && (
-                <View className="flex-row justify-between items-center mt-2">
-                  <Text className="text-gray-400 text-sm">ESP32 Car:</Text>
-                  <Text className={`font-bold ${carStatus.connected ? 'text-green-400' : 'text-red-400'}`}>
-                    {carStatus.connected ? '🟢 Online' : '🔴 Offline'}
-                  </Text>
+
+              {/* Connection Toggle */}
+              {!carConnected && !carConnecting ? (
+                <TouchableOpacity
+                  onPress={connectCarWebSocket}
+                  className="bg-green-600 px-4 py-1.5 rounded-lg active:opacity-80"
+                >
+                  <Text className="text-white font-bold text-xs">Connect</Text>
+                </TouchableOpacity>
+              ) : carConnecting ? (
+                <View className="bg-gray-700 px-4 py-1.5 rounded-lg">
+                  <Text className="text-blue-400 font-bold text-xs">Connecting...</Text>
                 </View>
-              )}
-              {lastCarCommand && (
-                <View className="flex-row justify-between items-center mt-2">
-                  <Text className="text-gray-400 text-sm">Last Command:</Text>
-                  <Text className="text-white font-bold uppercase">{lastCarCommand}</Text>
-                </View>
+              ) : (
+                <TouchableOpacity
+                  onPress={disconnectCarWebSocket}
+                  className="bg-red-600 px-4 py-1.5 rounded-lg active:opacity-80"
+                >
+                  <Text className="text-white font-bold text-xs">Disconnect</Text>
+                </TouchableOpacity>
               )}
             </View>
 
-            {/* Connection Button */}
-            {!carConnected && !carConnecting ? (
-              <TouchableOpacity
-                onPress={connectCarWebSocket}
-                className="bg-green-600 py-3 rounded-2xl mb-4 active:opacity-80"
-              >
-                <Text className="text-white font-bold text-center">Connect to Car</Text>
-              </TouchableOpacity>
-            ) : carConnecting ? (
-              <View className="bg-gray-800 py-3 rounded-2xl mb-4">
-                <Text className="text-blue-400 font-bold text-center">Connecting...</Text>
-              </View>
-            ) : (
-              <TouchableOpacity
-                onPress={disconnectCarWebSocket}
-                className="bg-red-600 py-3 rounded-2xl mb-4 active:opacity-80"
-              >
-                <Text className="text-white font-bold text-center">Disconnect Car</Text>
-              </TouchableOpacity>
-            )}
-
-            {/* Motor Speed Control */}
-            <View className="bg-gray-800 rounded-2xl p-3 mb-4">
-              <View className="flex-row justify-between items-center mb-2">
-                <Text className="text-gray-400 text-sm">Motor Speed</Text>
-                <Text className="text-white font-bold">{motorSpeed}/255</Text>
-              </View>
-              <View className="flex-row gap-2">
+            {/* Compact Speed Control */}
+            <View className="flex-row items-center justify-between bg-gray-800 rounded-xl p-2 mb-3">
+              <Text className="text-gray-400 text-xs">Speed:</Text>
+              <View className="flex-row items-center gap-2">
                 <TouchableOpacity
                   onPress={() => setMotorSpeed(Math.max(0, motorSpeed - 25))}
-                  className="bg-gray-700 px-4 py-2 rounded-xl active:opacity-70"
+                  className="bg-gray-700 w-7 h-7 rounded-lg items-center justify-center active:opacity-70"
                 >
-                  <Text className="text-white font-bold">-</Text>
+                  <MaterialIcons name="remove" size={16} color="#FFFFFF" />
                 </TouchableOpacity>
                 <TextInput
-                  className="flex-1 bg-gray-700 text-white text-center rounded-xl px-3 py-2 font-bold"
+                  className="bg-gray-700 text-white text-center rounded-lg w-16 py-1 font-bold text-xs"
                   value={motorSpeed.toString()}
                   onChangeText={(text) => {
                     const speed = parseInt(text) || 0;
@@ -542,63 +508,73 @@ export default function Index() {
                 />
                 <TouchableOpacity
                   onPress={() => setMotorSpeed(Math.min(255, motorSpeed + 25))}
-                  className="bg-gray-700 px-4 py-2 rounded-xl active:opacity-70"
+                  className="bg-gray-700 w-7 h-7 rounded-lg items-center justify-center active:opacity-70"
                 >
-                  <Text className="text-white font-bold">+</Text>
+                  <MaterialIcons name="add" size={16} color="#FFFFFF" />
                 </TouchableOpacity>
               </View>
+              <Text className="text-white font-bold text-xs">{motorSpeed}/255</Text>
             </View>
 
-            {/* Directional Controls */}
-            {carConnected && carStatus?.connected && (
+            {/* Directional Controls - Compact */}
+            {carConnected && carStatus?.connected ? (
               <View>
-                <Text className="text-gray-400 text-sm text-center mb-3">
-                  Hold buttons to move, release to stop
+                <Text className="text-gray-500 text-xs text-center mb-2">
+                  Hold to move • Release to stop
                 </Text>
                 
-                {/* Forward Button */}
-                <TouchableOpacity
-                  onPressIn={() => sendCarCommand('forward')}
-                  onPressOut={() => sendCarCommand('stop')}
-                  className="bg-green-600 py-4 rounded-2xl mb-2 active:opacity-80"
-                >
-                  <Text className="text-white font-bold text-center text-lg">⬆️ FORWARD</Text>
-                </TouchableOpacity>
-
-                {/* Left, Stop, Right Row */}
-                <View className="flex-row gap-2 mb-2">
+                {/* Control Grid */}
+                <View className="items-center">
+                  {/* Forward Button */}
                   <TouchableOpacity
-                    onPressIn={() => sendCarCommand('left')}
+                    onPressIn={() => sendCarCommand('forward')}
                     onPressOut={() => sendCarCommand('stop')}
-                    className="flex-1 bg-blue-600 py-4 rounded-2xl active:opacity-80"
+                    className="bg-green-600 w-16 h-12 rounded-xl mb-1 items-center justify-center active:opacity-80"
                   >
-                    <Text className="text-white font-bold text-center text-lg">⬅️ LEFT</Text>
+                    <MaterialIcons name="arrow-upward" size={24} color="#FFFFFF" />
                   </TouchableOpacity>
 
-                  <TouchableOpacity
-                    onPress={() => sendCarCommand('stop')}
-                    className="flex-1 bg-red-600 py-4 rounded-2xl active:opacity-80"
-                  >
-                    <Text className="text-white font-bold text-center text-lg">🛑 STOP</Text>
-                  </TouchableOpacity>
+                  {/* Left, Stop, Right Row */}
+                  <View className="flex-row gap-1 mb-1">
+                    <TouchableOpacity
+                      onPressIn={() => sendCarCommand('left')}
+                      onPressOut={() => sendCarCommand('stop')}
+                      className="bg-blue-600 w-16 h-12 rounded-xl items-center justify-center active:opacity-80"
+                    >
+                      <MaterialIcons name="arrow-back" size={24} color="#FFFFFF" />
+                    </TouchableOpacity>
 
+                    <TouchableOpacity
+                      onPress={() => sendCarCommand('stop')}
+                      className="bg-red-600 w-16 h-12 rounded-xl items-center justify-center active:opacity-80"
+                    >
+                      <MaterialIcons name="stop" size={24} color="#FFFFFF" />
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPressIn={() => sendCarCommand('right')}
+                      onPressOut={() => sendCarCommand('stop')}
+                      className="bg-blue-600 w-16 h-12 rounded-xl items-center justify-center active:opacity-80"
+                    >
+                      <MaterialIcons name="arrow-forward" size={24} color="#FFFFFF" />
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Backward Button */}
                   <TouchableOpacity
-                    onPressIn={() => sendCarCommand('right')}
+                    onPressIn={() => sendCarCommand('backward')}
                     onPressOut={() => sendCarCommand('stop')}
-                    className="flex-1 bg-blue-600 py-4 rounded-2xl active:opacity-80"
+                    className="bg-orange-600 w-16 h-12 rounded-xl items-center justify-center active:opacity-80"
                   >
-                    <Text className="text-white font-bold text-center text-lg">➡️ RIGHT</Text>
+                    <MaterialIcons name="arrow-downward" size={24} color="#FFFFFF" />
                   </TouchableOpacity>
                 </View>
-
-                {/* Backward Button */}
-                <TouchableOpacity
-                  onPressIn={() => sendCarCommand('backward')}
-                  onPressOut={() => sendCarCommand('stop')}
-                  className="bg-orange-600 py-4 rounded-2xl active:opacity-80"
-                >
-                  <Text className="text-white font-bold text-center text-lg">⬇️ BACKWARD</Text>
-                </TouchableOpacity>
+              </View>
+            ) : (
+              <View className="bg-gray-800 rounded-xl p-3">
+                <Text className="text-gray-500 text-xs text-center">
+                  {!carConnected ? 'Connect to enable controls' : 'Waiting for ESP32 car...'}
+                </Text>
               </View>
             )}
           </View>
