@@ -1,243 +1,332 @@
-#include "esp_camera.h"
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 
-// ===== WIFI CONFIGURATION ===== //
+// WiFi credentials
 const char *ssid = "TP-Link";
 const char *password = "asdfghjkl";
-// ============================== //
 
-// Server Configuration
-const char *serverHost = "192.168.0.115";
-const uint16_t serverPort = 3000;
-const char *serverPath = "/ws"; // Your WebSocket endpoint
+// WebSocket server
+const char *websocket_server = "192.168.0.115";
+const int websocket_port = 3000;
+const char *websocket_path = "/ws";
+
+// Motor A (Left wheels) pins
+#define ENA 33
+#define IN1 25
+#define IN2 26
+
+// Motor B (Right wheels) pins
+#define ENB 32
+#define IN3 14
+#define IN4 12
+
+// Water Pump pin (connected to relay module OR transistor/MOSFET)
+// For relay: GPIO → Relay IN
+// For transistor/MOSFET: GPIO → Base/Gate (with resistor)
+#define PUMP_PIN 27  // You can change this to any available GPIO pin
+
+// PWM settings
+const int freq = 30000;
+const int resolution = 8;
+
+// Default motor speed (0-255)
+uint8_t motorSpeed = 200;
+
+// Pump state
+bool pumpState = false;
 
 WebSocketsClient webSocket;
-bool wsConnected = false;
-unsigned long lastFrameTime = 0;
-const int frameInterval = 100; // ~10 FPS
-
-// Camera configuration (same as yours)
-#define PWDN_GPIO_NUM 32
-#define RESET_GPIO_NUM -1
-#define XCLK_GPIO_NUM 0
-#define SIOD_GPIO_NUM 26
-#define SIOC_GPIO_NUM 27
-#define Y9_GPIO_NUM 35
-#define Y8_GPIO_NUM 34
-#define Y7_GPIO_NUM 39
-#define Y6_GPIO_NUM 36
-#define Y5_GPIO_NUM 21
-#define Y4_GPIO_NUM 19
-#define Y3_GPIO_NUM 18
-#define Y2_GPIO_NUM 5
-#define VSYNC_GPIO_NUM 25
-#define HREF_GPIO_NUM 23
-#define PCLK_GPIO_NUM 22
-
-void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
-{
-  switch (type)
-  {
-  case WStype_DISCONNECTED:
-    Serial.println("❌ WebSocket DISCONNECTED");
-    wsConnected = false;
-    break;
-
-  case WStype_CONNECTED:
-    Serial.printf("✅ WebSocket CONNECTED to: %s\n", payload);
-    wsConnected = true;
-    // Send identification
-    sendIdentification();
-    break;
-
-  case WStype_TEXT:
-    // Handle text messages from server
-    if (length < 100)
-    { // Don't print long messages
-      Serial.printf("📨 Message: %s\n", payload);
-    }
-    break;
-
-  case WStype_BIN:
-    // Handle binary messages
-    Serial.printf("📦 Binary data: %d bytes\n", length);
-    break;
-
-  case WStype_ERROR:
-  case WStype_FRAGMENT_TEXT_START:
-  case WStype_FRAGMENT_BIN_START:
-  case WStype_FRAGMENT:
-  case WStype_FRAGMENT_FIN:
-    break;
-  }
-}
-
-void sendIdentification()
-{
-  DynamicJsonDocument doc(200);
-  doc["type"] = "esp32_camera";
-  doc["device"] = "ESP32-CAM";
-  doc["frame_size"] = "CIF"; // Changed from "QVGA" to "CIF"
-  doc["quality"] = 15;
-
-  String message;
-  serializeJson(doc, message);
-  webSocket.sendTXT(message);
-}
-
-void sendFrame()
-{
-  if (!wsConnected || !webSocket.isConnected())
-  {
-    return;
-  }
-
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb)
-  {
-    Serial.println("❌ Camera capture failed");
-    return;
-  }
-
-  // Send as binary data (more efficient than base64)
-  bool success = webSocket.sendBIN(fb->buf, fb->len);
-
-  if (!success)
-  {
-    Serial.println("❌ Failed to send frame");
-    wsConnected = false;
-  }
-
-  // Print status every 30 frames
-  static unsigned long frameCount = 0;
-  if (++frameCount % 30 == 0)
-  {
-    Serial.printf("✅ Frames sent: %lu (size: %d bytes)\n", frameCount, fb->len);
-  }
-
-  esp_camera_fb_return(fb);
-}
-
-bool initCamera()
-{
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 10000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_CIF; // Changed from FRAMESIZE_QVGA to FRAMESIZE_CIF
-  config.jpeg_quality = 15;
-  config.fb_count = 1;
-
-  return esp_camera_init(&config) == ESP_OK;
-}
-
-bool connectWiFi()
-{
-  Serial.println("\n📡 Connecting to WiFi...");
-  WiFi.begin(ssid, password);
-
-  for (int i = 0; i < 20; i++)
-  {
-    if (WiFi.status() == WL_CONNECTED)
-    {
-      Serial.printf("✅ WiFi Connected! IP: %s\n", WiFi.localIP().toString().c_str());
-      return true;
-    }
-    delay(1000);
-    Serial.print(".");
-  }
-  Serial.println("\n❌ WiFi Failed");
-  return false;
-}
-
-void connectWebSocket()
-{
-  Serial.println("\n🔌 Connecting to WebSocket...");
-  webSocket.begin(serverHost, serverPort, serverPath);
-  webSocket.onEvent(webSocketEvent);
-  webSocket.setReconnectInterval(2000);
-}
 
 void setup()
 {
   Serial.begin(115200);
-  delay(1000);
 
-  Serial.println("\n🚀 ESP32-CAM WebSocket Streamer Starting...");
+  // Initialize motor pins
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENB, OUTPUT);
 
-  if (!initCamera())
+  // Initialize water pump pin
+  pinMode(PUMP_PIN, OUTPUT);
+  digitalWrite(PUMP_PIN, LOW);  // Make sure pump is OFF initially
+
+  // Setup PWM - FIXED FOR ESP32 CORE v3.x
+  ledcAttach(ENA, freq, resolution);  // Replaces ledcSetup + ledcAttachPin
+  ledcAttach(ENB, freq, resolution);  // Replaces ledcSetup + ledcAttachPin
+
+  // Stop motors initially
+  stopCar();
+
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED)
   {
-    Serial.println("❌ Camera initialization failed!");
-    return;
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
   }
-  Serial.println("✅ Camera initialized");
+  Serial.println("Connected to WiFi");
 
-  if (!connectWiFi())
-  {
-    return;
-  }
-
-  connectWebSocket();
+  // Initialize WebSocket
+  webSocket.begin(websocket_server, websocket_port, websocket_path);
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(5000);
 }
 
 void loop()
 {
   webSocket.loop();
+}
 
-  // Handle WiFi disconnection
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    Serial.println("⚠️ WiFi disconnected");
-    wsConnected = false;
-    delay(5000);
-    connectWiFi();
-    if (WiFi.status() == WL_CONNECTED)
-    {
-      connectWebSocket();
-    }
-    return;
-  }
+// ===== MOTOR CONTROL FUNCTIONS ===== //
 
-  // Send frames when connected
-  if (wsConnected && webSocket.isConnected())
+void motorAForward()
+{
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+}
+
+void motorABackward()
+{
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+}
+
+void motorAStop()
+{
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+}
+
+void motorBForward()
+{
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void motorBBackward()
+{
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+}
+
+void motorBStop()
+{
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
+
+void setMotorASpeed(uint8_t speed)
+{
+  ledcWrite(ENA, speed);  // Changed: now writes directly to pin instead of channel
+}
+
+void setMotorBSpeed(uint8_t speed)
+{
+  ledcWrite(ENB, speed);  // Changed: now writes directly to pin instead of channel
+}
+
+// ===== CAR CONTROL FUNCTIONS ===== //
+
+void moveForward()
+{
+  motorAForward();
+  motorBForward();
+  setMotorASpeed(motorSpeed);
+  setMotorBSpeed(motorSpeed);
+  Serial.println("⬆️  Moving FORWARD");
+}
+
+void moveBackward()
+{
+  motorABackward();
+  motorBBackward();
+  setMotorASpeed(motorSpeed);
+  setMotorBSpeed(motorSpeed);
+  Serial.println("⬇️  Moving BACKWARD");
+}
+
+void turnLeft()
+{
+  // Left motor backward, right motor forward
+  motorABackward();
+  motorBForward();
+  setMotorASpeed(motorSpeed);
+  setMotorBSpeed(motorSpeed);
+  Serial.println("⬅️  Turning LEFT");
+}
+
+void turnRight()
+{
+  // Left motor forward, right motor backward
+  motorAForward();
+  motorBBackward();
+  setMotorASpeed(motorSpeed);
+  setMotorBSpeed(motorSpeed);
+  Serial.println("➡️  Turning RIGHT");
+}
+
+void stopCar()
+{
+  motorAStop();
+  motorBStop();
+  setMotorASpeed(0);
+  setMotorBSpeed(0);
+  Serial.println("🛑 Car STOPPED");
+}
+
+// ===== WATER PUMP CONTROL FUNCTIONS ===== //
+
+void pumpOn()
+{
+  digitalWrite(PUMP_PIN, HIGH);
+  pumpState = true;
+  Serial.println("💧 Water Pump ON");
+}
+
+void pumpOff()
+{
+  digitalWrite(PUMP_PIN, LOW);
+  pumpState = false;
+  Serial.println("🚫 Water Pump OFF");
+}
+
+void togglePump()
+{
+  if (pumpState)
   {
-    unsigned long currentTime = millis();
-    if (currentTime - lastFrameTime >= frameInterval)
-    {
-      sendFrame();
-      lastFrameTime = currentTime;
-    }
+    pumpOff();
   }
   else
   {
-    // Try to reconnect if disconnected
-    static unsigned long lastReconnectAttempt = 0;
-    if (millis() - lastReconnectAttempt > 5000)
+    pumpOn();
+  }
+}
+
+// ===== WEBSOCKET FUNCTIONS ===== //
+
+void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
+{
+  switch (type)
+  {
+  case WStype_CONNECTED:
+  {
+    Serial.printf("✅ Connected to WebSocket server\n");
+
+    // Send identification message
+    String identifyMsg = "{\"type\":\"esp32_car\",\"device\":\"car_controller\",\"status\":\"ready\",\"features\":[\"movement\",\"pump\"]}";
+    webSocket.sendTXT(identifyMsg);
+    Serial.println("📤 Sent identification message");
+    break;
+  }
+
+  case WStype_DISCONNECTED:
+    Serial.printf("❌ Disconnected from WebSocket server\n");
+    break;
+
+  case WStype_TEXT:
+  {
+    Serial.printf("📨 Received: %s\n", payload);
+    handleCommand((char *)payload);
+    break;
+  }
+
+  case WStype_ERROR:
+    Serial.printf("❌ WebSocket error\n");
+    break;
+  }
+}
+
+void handleCommand(char *command)
+{
+  // Parse JSON command
+  DynamicJsonDocument doc(200);
+  DeserializationError error = deserializeJson(doc, command);
+
+  if (error)
+  {
+    Serial.printf("❌ JSON parse error: %s\n", error.c_str());
+    return;
+  }
+
+  // ⚠️ CRITICAL FIX: Ignore acknowledgment messages from ourselves or server
+  if (doc.containsKey("type"))
+  {
+    String messageType = doc["type"];
+    if (messageType == "ack" || messageType == "car_ack")
     {
-      Serial.println("🔄 Attempting to reconnect...");
-      connectWebSocket();
-      lastReconnectAttempt = millis();
+      Serial.println("🔄 Ignoring ACK message (to prevent loop)");
+      return; // Don't process acknowledgment messages
     }
   }
 
-  delay(10);
+  String cmd = doc["command"];
+  int speed = doc["speed"] | motorSpeed; // Use provided speed or default
+
+  // Check if command is valid
+  if (cmd == "")
+  {
+    Serial.println("⚠️  Empty command received");
+    return;
+  }
+
+  // Update motor speed if provided
+  if (doc.containsKey("speed"))
+  {
+    motorSpeed = constrain(speed, 0, 255);
+    Serial.printf("⚙️  Motor speed set to: %d\n", motorSpeed);
+  }
+
+  // Execute the command
+  if (cmd == "forward")
+  {
+    moveForward();
+  }
+  else if (cmd == "backward")
+  {
+    moveBackward();
+  }
+  else if (cmd == "left")
+  {
+    turnLeft();
+  }
+  else if (cmd == "right")
+  {
+    turnRight();
+  }
+  else if (cmd == "stop")
+  {
+    stopCar();
+  }
+  else if (cmd == "pump_on")
+  {
+    pumpOn();
+  }
+  else if (cmd == "pump_off")
+  {
+    pumpOff();
+  }
+  else if (cmd == "pump_toggle")
+  {
+    togglePump();
+  }
+  else
+  {
+    Serial.printf("⚠️  Unknown command: %s\n", cmd.c_str());
+    return; // Don't send ACK for unknown commands
+  }
+
+  // Send acknowledgment back to server (only for valid commands)
+  DynamicJsonDocument ackDoc(100);
+  ackDoc["type"] = "ack";
+  ackDoc["command"] = cmd;
+  ackDoc["status"] = "executed";
+
+  String ackMsg;
+  serializeJson(ackDoc, ackMsg);
+  webSocket.sendTXT(ackMsg);
+  Serial.printf("✅ Sent ACK for: %s\n", cmd.c_str());
 }
